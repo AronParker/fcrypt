@@ -1,6 +1,7 @@
 pub mod crypto;
 
 use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::{io, mem};
 
@@ -83,12 +84,31 @@ struct Decrypt {
 const PB_TEMPLATE: &str = "{spinner:.green} [{elapsed_precise}] {msg} [{wide_bar}] \
                            {bytes}/{total_bytes} ({bytes_per_sec}, {eta})";
 
+fn prompt_password(prompt: &str) -> io::Result<String> {
+    rpassword::prompt_password(prompt).or_else(|_| {
+        let mut s = String::new();
+        io::stdout().write_all(prompt.as_bytes())?;
+        io::stdout().flush()?;
+        io::stdin().read_line(&mut s)?;
+
+        if s.ends_with('\n') {
+            s.pop();
+        }
+
+        if s.ends_with('\r') {
+            s.pop();
+        }
+
+        Ok(s)
+    })
+}
+
 fn encrypt(enc: &Encrypt) -> io::Result<u64> {
     let mut input = File::open(&enc.src_file)?;
     let len = input.metadata()?.len();
 
-    let pw = rpassword::prompt_password("Password: ").unwrap();
-    let pw2 = rpassword::prompt_password("Retype password: ").unwrap();
+    let pw = prompt_password("Password: ").unwrap();
+    let pw2 = prompt_password("Retype password: ").unwrap();
 
     if pw != pw2 {
         eprintln!("Password mismatch.");
@@ -118,7 +138,7 @@ fn encrypt(enc: &Encrypt) -> io::Result<u64> {
 }
 
 fn decrypt(dec: &Decrypt) -> io::Result<u64> {
-    let pw = rpassword::prompt_password("Password: ").unwrap();
+    let pw = prompt_password("Password: ").unwrap();
 
     let input = File::open(&dec.src_file)?;
     let len = input.metadata()?.len() - mem::size_of::<FileHeader>() as u64;
@@ -140,10 +160,10 @@ fn decrypt(dec: &Decrypt) -> io::Result<u64> {
 }
 
 fn change_pw(ch: &ChangePw) -> io::Result<()> {
-    let old_pw = rpassword::prompt_password("Old password: ").unwrap();
+    let old_pw = prompt_password("Old password: ").unwrap();
 
-    let pw = rpassword::prompt_password("New password: ").unwrap();
-    let pw2 = rpassword::prompt_password("Retype new password: ").unwrap();
+    let pw = prompt_password("New password: ").unwrap();
+    let pw2 = prompt_password("Retype new password: ").unwrap();
 
     if pw != pw2 {
         eprintln!("Password mismatch.");
