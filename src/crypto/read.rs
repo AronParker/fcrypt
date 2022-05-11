@@ -1,10 +1,10 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::{fmt, io};
 
 use chacha20::cipher::StreamCipher;
 use chacha20::XChaCha20;
 
-use crate::crypto::{argon2d, expand, FileHeader, Secret, CONFIG};
+use crate::crypto::{FileHeader, CONFIG};
 
 pub struct CryptoReader<R: Read + Seek> {
     inner: R,
@@ -12,58 +12,41 @@ pub struct CryptoReader<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> CryptoReader<R> {
-    pub fn new<P: AsRef<[u8]>>(inner: R, pw: P, buf_size: usize) -> io::Result<Self> {
-        Self::create(inner, pw.as_ref(), buf_size)
+    pub fn new<P: AsRef<[u8]>>(inner: R, pw: P) -> io::Result<Self> {
+        Self::create(inner, pw.as_ref())
     }
 
-    fn create(mut inner: R, pw: &[u8], buf_size: usize) -> io::Result<Self> {
-        assert_ne!(buf_size, 0);
-
-        let mut header: FileHeader = bincode::decode_from_std_read(&mut inner, CONFIG)
+    fn create(mut inner: R, pw: &[u8]) -> io::Result<Self> {
+        let header: FileHeader = bincode::decode_from_std_read(&mut inner, CONFIG)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        let (mut hasher, cipher) = {
-            let secret = argon2d(pw, &header.params);
-            let (mut hasher, mut cipher) = expand(&secret);
-
-            hasher.update(&header.encrypted_dek);
-
-            let expected: blake3::Hash = header.dek_tag.into();
-            let actual = hasher.finalize();
-
-            if expected != actual {
-                return Err(io::ErrorKind::InvalidData.into());
-            }
-
-            let mut dek = Secret::default();
-            cipher
-                .apply_keystream_b2b(&header.encrypted_dek, &mut dek.0)
-                .expect("end of keystream reached");
-
-            expand(&dek)
-        };
-
-        let mut buf = vec![0; buf_size];
+        let (hasher, cipher) = header.read_dek(pw)?.into_hasher_and_cipher();
 
         {
-            let pos = inner.stream_position()?;
+            struct WriteHasher(blake3::Hasher);
 
-            while let Ok(read) = inner.read(&mut buf) {
-                if read == 0 {
-                    break;
+            impl Write for WriteHasher {
+                fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                    self.0.update(buf);
+                    Ok(buf.len())
                 }
 
-                hasher.update(&buf[..read]);
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
             }
 
+            let mut write_hasher = WriteHasher(hasher);
+            let copied = io::copy(&mut inner, &mut write_hasher)?;
+
             let expected: blake3::Hash = header.auth_tag.into();
-            let actual = hasher.finalize();
+            let actual = write_hasher.0.finalize();
 
             if expected != actual {
                 return Err(io::ErrorKind::InvalidData.into());
             }
 
-            inner.seek(SeekFrom::Start(pos))?;
+            inner.seek(SeekFrom::Current(-(copied as i64)))?;
         }
 
         Ok(Self { inner, cipher })

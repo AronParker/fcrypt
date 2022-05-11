@@ -2,11 +2,10 @@ use std::error::Error;
 use std::io::{Seek, SeekFrom, Write};
 use std::{fmt, io, mem, ptr};
 
-use chacha20::cipher::{StreamCipher, StreamCipherSeek};
+use chacha20::cipher::StreamCipher;
 use chacha20::XChaCha20;
-use rand_core::{OsRng, RngCore};
 
-use crate::crypto::{argon2d, expand, Argon2dParams, FileHeader, Secret, CONFIG};
+use crate::crypto::{Argon2dParams, FileHeader, CONFIG};
 
 pub struct CryptoWriter<W: Write + Seek> {
     header: FileHeader,
@@ -36,24 +35,8 @@ impl<W: Write + Seek> CryptoWriter<W> {
     ) -> io::Result<Self> {
         assert_ne!(buf_size, 0);
 
-        let mut header = FileHeader {
-            params: *params,
-            ..Default::default()
-        };
-        let dek = Secret::new();
-
-        {
-            let secret = argon2d(pw, params);
-            let (mut hasher, mut cipher) = expand(&secret);
-
-            cipher
-                .apply_keystream_b2b(&dek.0, &mut header.encrypted_dek)
-                .expect("Failed to encrypt DEK");
-            hasher.update(&header.encrypted_dek);
-            header.dek_tag = hasher.finalize().into();
-        }
-
-        let (hasher, cipher) = expand(&dek);
+        let (header, dek) = FileHeader::new(pw, params);
+        let (hasher, cipher) = dek.into_hasher_and_cipher();
 
         let data_off = inner.seek(SeekFrom::Current(mem::size_of::<FileHeader>() as i64))?;
 
