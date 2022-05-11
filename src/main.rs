@@ -3,12 +3,14 @@ pub mod crypto;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use std::{io, mem};
 
 use clap::{Args, Parser};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::crypto::{Argon2dParams, CryptoReader, CryptoWriter, FileHeader};
+use crate::crypto::{benchmark_argon2d, Argon2dParams, CryptoReader, CryptoWriter, FileHeader};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -20,6 +22,7 @@ enum Cli {
     Encrypt(Encrypt),
     Decrypt(Decrypt),
     ChangePw(ChangePw),
+    Bench(Bench),
 }
 
 /// Encrypts a file
@@ -47,6 +50,19 @@ struct Encrypt {
     parallelism: u32,
 }
 
+/// Decrypt a file
+#[derive(Args, Debug)]
+#[clap(alias = "d")]
+struct Decrypt {
+    /// The file to decrypt
+    #[clap(parse(from_os_str))]
+    src_file: PathBuf,
+
+    /// The decrypted file
+    #[clap(parse(from_os_str))]
+    dst_file: PathBuf,
+}
+
 /// Change password of a file
 #[derive(Args, Debug)]
 #[clap(alias = "c")]
@@ -68,17 +84,21 @@ struct ChangePw {
     parallelism: u32,
 }
 
-/// Decrypt a file
+/// Compute number of Argon2d iterations per second
 #[derive(Args, Debug)]
-#[clap(alias = "d")]
-struct Decrypt {
-    /// The file to decrypt
-    #[clap(parse(from_os_str))]
-    src_file: PathBuf,
+#[clap(alias = "b")]
+struct Bench {
+    /// The amount of seconds to wait
+    #[clap(short, long, parse(try_from_str), default_value_t = 1)]
+    seconds: u64,
 
-    /// The decrypted file
-    #[clap(parse(from_os_str))]
-    dst_file: PathBuf,
+    /// The amount of memory to use for Argon2d (in MiB's)
+    #[clap(short, long, parse(try_from_str), default_value_t = 64)]
+    memory: u32,
+
+    /// The degree of parallelism to use for Argon2d
+    #[clap(short, long, parse(try_from_str), default_value_t = 2)]
+    parallelism: u32,
 }
 
 const PB_TEMPLATE: &str = "{spinner:.green} [{elapsed_precise}] {msg} [{wide_bar}] \
@@ -181,6 +201,30 @@ fn change_pw(ch: &ChangePw) -> io::Result<()> {
     crypto::change_password(&mut file, old_pw, pw, &params)
 }
 
+fn bench(ben: &Bench) -> io::Result<f64> {
+    static SUM: AtomicUsize = AtomicUsize::new(0);
+
+    let max = Duration::from_secs(ben.seconds);
+
+    let mut params = Argon2dParams {
+        memory: ben.memory * 1024,
+        iterations: 1,
+        parallelism: ben.parallelism,
+    };
+
+    loop {
+        let inst = Instant::now();
+        SUM.fetch_add(benchmark_argon2d(&params)?, Ordering::Relaxed);
+        let elapsed = inst.elapsed();
+
+        if elapsed > max {
+            return Ok(params.iterations as f64 / elapsed.as_secs_f64());
+        }
+
+        params.iterations *= 2;
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -209,6 +253,18 @@ fn main() {
             }
             Err(err) => {
                 eprintln!("An error occurred during password change: {err}");
+                std::process::exit(1);
+            }
+        },
+        Cli::Bench(ben) => match bench(ben) {
+            Ok(iterations) => {
+                println!(
+                    "Number of iterations in {}s: {:.2}",
+                    ben.seconds, iterations
+                );
+            }
+            Err(err) => {
+                eprintln!("An error occurred during benchmarking: {err}");
                 std::process::exit(1);
             }
         },

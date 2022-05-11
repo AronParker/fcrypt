@@ -196,6 +196,23 @@ where
     Ok(())
 }
 
+pub fn benchmark_argon2d(params: &Argon2dParams) -> io::Result<usize> {
+    let argon2 = Argon2::new(
+        Algorithm::Argon2d,
+        Version::V0x13,
+        Params::new(params.memory, params.iterations, params.parallelism, None)
+            .expect("invalid parameters"),
+    );
+
+    let mut output = [0; SECRET_LEN];
+
+    argon2
+        .hash_password_into(&[], &[0; SALT_LEN], &mut output)
+        .expect("failed to hash password.");
+
+    Ok(output.iter().position(|x| *x == 0).unwrap_or(0))
+}
+
 fn argon2d(pw: &[u8], salt: &[u8], params: &Argon2dParams) -> Secret {
     let argon2 = Argon2::new(
         Algorithm::Argon2d,
