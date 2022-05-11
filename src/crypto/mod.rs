@@ -1,6 +1,7 @@
 pub mod read;
 pub mod write;
 
+use std::io::{Seek, SeekFrom};
 use std::{io, mem};
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -12,7 +13,7 @@ use rand_core::{OsRng, RngCore};
 pub use read::CryptoReader;
 use sha2::Sha256;
 pub use write::CryptoWriter;
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const TAG_LEN: usize = 32;
 const SECRET_LEN: usize = 32;
@@ -132,26 +133,67 @@ impl Secret {
 
         let hash = {
             let mut mac_key = [0; MAC_KEY_LEN];
-            hkdf.expand(b"mac_key", &mut mac_key)
-                .expect("failed to create mac_key");
+            hkdf.expand(b"mac_key", &mut mac_key).unwrap();
 
-            blake3::Hasher::new_keyed(&mac_key)
+            let hash = blake3::Hasher::new_keyed(&mac_key);
+            mac_key.zeroize();
+
+            hash
         };
 
-        let chacha20 = {
+        let cipher = {
             let mut sym_key = [0; SYM_KEY_LEN];
             let mut nonce = [0; NONCE_LEN];
 
-            hkdf.expand(b"sym_key", &mut sym_key)
-                .expect("failed to create sym_key");
-            hkdf.expand(b"nonce", &mut nonce)
-                .expect("failed to create nonce");
+            hkdf.expand(b"sym_key", &mut sym_key).unwrap();
+            hkdf.expand(b"nonce", &mut nonce).unwrap();
 
-            XChaCha20::new(Key::from_slice(&sym_key), XNonce::from_slice(&nonce))
+            let cipher = XChaCha20::new(Key::from_slice(&sym_key), XNonce::from_slice(&nonce));
+
+            sym_key.zeroize();
+            nonce.zeroize();
+
+            cipher
         };
 
-        (hash, chacha20)
+        (hash, cipher)
     }
+}
+
+pub fn change_password<F, POld, PNew>(
+    file: &mut F,
+    old_pw: POld,
+    new_pw: PNew,
+    params: &Argon2dParams,
+) -> io::Result<()>
+where
+    F: io::Read + io::Write + Seek,
+    POld: AsRef<[u8]>,
+    PNew: AsRef<[u8]>,
+{
+    _change_password(file, old_pw.as_ref(), new_pw.as_ref(), params)
+}
+
+pub fn _change_password<F>(
+    mut file: &mut F,
+    old_pw: &[u8],
+    new_pw: &[u8],
+    params: &Argon2dParams,
+) -> io::Result<()>
+where
+    F: io::Read + io::Write + Seek,
+{
+    let pos = file.stream_position()?;
+    let mut header: FileHeader = bincode::decode_from_std_read(&mut file, CONFIG)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    header.change_password(old_pw, new_pw, params)?;
+    file.seek(SeekFrom::Start(pos))?;
+
+    bincode::encode_into_std_write(&header, &mut file, CONFIG)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    Ok(())
 }
 
 fn argon2d(pw: &[u8], salt: &[u8], params: &Argon2dParams) -> Secret {

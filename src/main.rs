@@ -1,6 +1,6 @@
 pub mod crypto;
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::{io, mem};
 
@@ -18,6 +18,7 @@ use crate::crypto::{Argon2dParams, CryptoReader, CryptoWriter, FileHeader};
 enum Cli {
     Encrypt(Encrypt),
     Decrypt(Decrypt),
+    ChangePw(ChangePw),
 }
 
 /// Encrypts a file
@@ -45,7 +46,28 @@ struct Encrypt {
     parallelism: u32,
 }
 
-/// Decompress minecraft world.
+/// Change password of a file
+#[derive(Args, Debug)]
+#[clap(alias = "c")]
+struct ChangePw {
+    /// The file to encrypt
+    #[clap(parse(from_os_str))]
+    file: PathBuf,
+
+    /// The amount of memory to use for Argon2d (in MiB's)
+    #[clap(short, long, parse(try_from_str), default_value_t = 64)]
+    memory: u32,
+
+    /// The number of iterations to use for Argon2d
+    #[clap(short, long, parse(try_from_str), default_value_t = 2)]
+    iterations: u32,
+
+    /// The degree of parallelism to use for Argon2d
+    #[clap(short, long, parse(try_from_str), default_value_t = 2)]
+    parallelism: u32,
+}
+
+/// Decrypt a file
 #[derive(Args, Debug)]
 #[clap(alias = "d")]
 struct Decrypt {
@@ -63,7 +85,6 @@ const PB_TEMPLATE: &str = "{spinner:.green} [{elapsed_precise}] {msg} [{wide_bar
 
 fn encrypt(enc: &Encrypt) -> io::Result<u64> {
     let mut input = File::open(&enc.src_file)?;
-    let output = File::create(&enc.dst_file)?;
     let len = input.metadata()?.len();
 
     let pw = rpassword::prompt_password("Password: ").unwrap();
@@ -80,6 +101,7 @@ fn encrypt(enc: &Encrypt) -> io::Result<u64> {
         parallelism: enc.parallelism,
     };
 
+    let output = File::create(&enc.dst_file)?;
     let mut output = CryptoWriter::new(output, pw, &params, 8192)?;
     let pb = ProgressBar::new(len)
         .with_message("Encrypting")
@@ -96,13 +118,13 @@ fn encrypt(enc: &Encrypt) -> io::Result<u64> {
 }
 
 fn decrypt(dec: &Decrypt) -> io::Result<u64> {
-    let input = File::open(&dec.src_file)?;
-    let mut output = File::create(&dec.dst_file)?;
-    let len = input.metadata()?.len() - mem::size_of::<FileHeader>() as u64;
-
     let pw = rpassword::prompt_password("Password: ").unwrap();
 
+    let input = File::open(&dec.src_file)?;
+    let len = input.metadata()?.len() - mem::size_of::<FileHeader>() as u64;
     let mut input = CryptoReader::new(input, pw)?;
+    let mut output = File::create(&dec.dst_file)?;
+
     let pb = ProgressBar::new(len)
         .with_message("Decrypting")
         .with_style(ProgressStyle::with_template(PB_TEMPLATE).unwrap());
@@ -117,6 +139,28 @@ fn decrypt(dec: &Decrypt) -> io::Result<u64> {
     r
 }
 
+fn change_pw(ch: &ChangePw) -> io::Result<()> {
+    let old_pw = rpassword::prompt_password("Old password: ").unwrap();
+
+    let pw = rpassword::prompt_password("New password: ").unwrap();
+    let pw2 = rpassword::prompt_password("Retype new password: ").unwrap();
+
+    if pw != pw2 {
+        eprintln!("Password mismatch.");
+        std::process::exit(1);
+    }
+
+    let params = Argon2dParams {
+        memory: ch.memory * 1024,
+        iterations: ch.iterations,
+        parallelism: ch.parallelism,
+    };
+
+    let mut file = OpenOptions::new().read(true).write(true).open(&ch.file)?;
+
+    crypto::change_password(&mut file, old_pw, pw, &params)
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -126,7 +170,7 @@ fn main() {
                 println!("Encryption successful.");
             }
             Err(err) => {
-                eprintln!("An error occurred: {err}");
+                eprintln!("An error occurred during encryption: {err}");
                 std::process::exit(1);
             }
         },
@@ -135,7 +179,16 @@ fn main() {
                 println!("Decryption successful.");
             }
             Err(err) => {
-                eprintln!("An error occured: {err}");
+                eprintln!("An error occurred during decryption: {err}");
+                std::process::exit(1);
+            }
+        },
+        Cli::ChangePw(ch) => match change_pw(ch) {
+            Ok(_) => {
+                println!("Password changed successfully.");
+            }
+            Err(err) => {
+                eprintln!("An error occurred during password change: {err}");
                 std::process::exit(1);
             }
         },

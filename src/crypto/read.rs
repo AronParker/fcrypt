@@ -37,7 +37,8 @@ impl<R: Read + Seek> CryptoReader<R> {
             }
 
             let mut write_hasher = WriteHasher(hasher);
-            let copied = io::copy(&mut inner, &mut write_hasher)?;
+            let pos = inner.stream_position()?;
+            io::copy(&mut inner, &mut write_hasher)?;
 
             let expected: blake3::Hash = header.auth_tag.into();
             let actual = write_hasher.0.finalize();
@@ -46,7 +47,7 @@ impl<R: Read + Seek> CryptoReader<R> {
                 return Err(io::ErrorKind::InvalidData.into());
             }
 
-            inner.seek(SeekFrom::Current(-(copied as i64)))?;
+            inner.seek(SeekFrom::Start(pos))?;
         }
 
         Ok(Self { inner, cipher })
